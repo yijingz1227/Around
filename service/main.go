@@ -20,7 +20,7 @@ const (
 	//PROJECT_ID = "around-xxx"
 	//BT_INSTANCE = "around-post"
 	// Needs to update this URL if you deploy it to cloud.
-	ES_URL = "http://35.196.96.160:9200/"
+	ES_URL = "http://35.231.17.224:9200"
 )
 
 
@@ -34,15 +34,18 @@ type Post struct {
 	User     string `json:"user"`
 	Message  string  `json:"message"`
 	Location Location `json:"location"`
+	Id	string `json:"id"`
 }
 
 func main() {
+	//Start from scratch: deleteIndex()
 	// Create a client
 	client, err := elastic.NewClient(elastic.SetURL(ES_URL), elastic.SetSniff(false))
 	if err != nil {
 		panic(err)
 		return
 	}
+
 
 	// Use the IndexExists service to check if a specified index exists.
 	exists, err := client.IndexExists(INDEX).Do()
@@ -73,6 +76,7 @@ func main() {
 	fmt.Println("started-service")
 	http.HandleFunc("/post", handlerPost)
 	http.HandleFunc("/search", handlerSearch)
+	http.HandleFunc("/delete", handlerDelete)
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
@@ -86,9 +90,22 @@ func handlerPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := uuid.New()
+	p.Id = id
+	fmt.Println(id)
 	// Save to ES.
 	saveToES(&p, id)
 
+}
+
+func handlerDelete(w http.ResponseWriter, r *http.Request) {
+	fmt.Println("Received one delete request")
+	decoder := json.NewDecoder(r.Body)
+	var p Post
+	if err := decoder.Decode(&p); err != nil {
+		panic(err)
+		return
+	}
+	deleteToES(&p)
 }
 
 // Save a post to ElasticSearch
@@ -116,6 +133,46 @@ func saveToES(p *Post, id string) {
 	fmt.Printf("Post is saved to Index: %s\n", p.Message)
 }
 
+func deleteToES (p* Post) {
+	// Create a client
+	es_client, err := elastic.NewClient(elastic.SetURL(ES_URL), elastic.SetSniff(false))
+	if err != nil {
+		panic(err)
+		return
+	}
+
+	// Delete by Query
+	id := p.Id
+	_, err = es_client.Delete().Index(INDEX).
+								Type(TYPE).
+							    Id(id).
+								Do()
+
+	if err != nil {
+		panic(err)
+		return
+	}
+
+	fmt.Printf("Post is deleted to Index: %s\n", p.Message)
+}
+
+func deleteIndex() {
+	es_client, err := elastic.NewClient(elastic.SetURL(ES_URL), elastic.SetSniff(false))
+	if err != nil {
+		panic(err)
+		return
+	}
+
+	_, err = es_client.DeleteIndex(INDEX).Do()
+
+
+	if err != nil {
+		panic(err)
+		return
+	}
+
+	fmt.Printf("Index is deleted. Restart service to recreate mapping.\n")
+}
 
 func handlerSearch(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Received one request for search")
@@ -185,6 +242,7 @@ func handlerSearch(w http.ResponseWriter, r *http.Request) {
 
 }
 
+//TODO: use regex for better filtering. 
 func containsFilteredWords(s *string) bool {
 	filteredWords := []string{
 		"fuck",
