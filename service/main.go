@@ -144,9 +144,9 @@ func deleteToES (p* Post) {
 	// Delete by Query
 	id := p.Id
 	_, err = es_client.Delete().Index(INDEX).
-								Type(TYPE).
-							    Id(id).
-								Do()
+				    Type(TYPE).
+				    Id(id).
+			            Do()
 
 	if err != nil {
 		panic(err)
@@ -242,7 +242,7 @@ func handlerSearch(w http.ResponseWriter, r *http.Request) {
 
 }
 
-//TODO: use regex for better filtering. 
+//TODO: use regex for better filtering.
 func containsFilteredWords(s *string) bool {
 	filteredWords := []string{
 		"fuck",
