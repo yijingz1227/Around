@@ -24,7 +24,7 @@ const (
 	TYPE     = "post"
 	DISTANCE = "200km"
 	// Needs to update this URL if you deploy it to cloud.
-	ES_URL      = "http://35.231.42.231:9200"
+	ES_URL      = "http://35.231.85.52/:9200"
 	BUCKET_NAME = "post-images-31415926"
 	PROJECT_ID  = "curious-domain-203921"
 	BT_INSTANCE = "around_post"
