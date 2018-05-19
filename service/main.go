@@ -1,32 +1,34 @@
 package main
 
 import (
-	"context"
+	"cloud.google.com/go/bigtable"
 	"cloud.google.com/go/storage"
-	"gopkg.in/olivere/elastic.v3"
-	"fmt"
-	"net/http"
+	"context"
 	"encoding/json"
-	"log"
-	"strconv"
-	"reflect"
+	"fmt"
+	"github.com/auth0/go-jwt-middleware"
+	"github.com/dgrijalva/jwt-go"
+	"github.com/gorilla/mux"
 	"github.com/pborman/uuid"
-	"strings"
+	"gopkg.in/olivere/elastic.v3"
 	"io"
+	"log"
+	"net/http"
+	"reflect"
+	"strconv"
+	"strings"
 )
 
 const (
-	INDEX = "around"
-	TYPE = "post"
+	INDEX    = "around"
+	TYPE     = "post"
 	DISTANCE = "200km"
-	// Needs to update
-	//PROJECT_ID = "around-xxx"
-	//BT_INSTANCE = "around-post"
 	// Needs to update this URL if you deploy it to cloud.
-	ES_URL = "http://35.231.94.67:9200"
+	ES_URL      = "http://35.231.42.231:9200"
 	BUCKET_NAME = "post-images-31415926"
+	PROJECT_ID  = "curious-domain-203921"
+	BT_INSTANCE = "around_post"
 )
-
 
 type Location struct {
 	Lat float64 `json:"lat"`
@@ -35,12 +37,14 @@ type Location struct {
 
 type Post struct {
 	// `json:"user"` is for the json parsing of this User field. Otherwise, by default it's 'User'.
-	User     string `json:"user"`
-	Message  string  `json:"message"`
+	User     string   `json:"user"`
+	Message  string   `json:"message"`
 	Location Location `json:"location"`
-	Id	string `json:"id"`
-	Url string `json:url`
+	Id       string   `json:"id"`
+	Url      string   `json:"url"`
 }
+
+var mySigningKey = []byte("secret")
 
 func main() {
 	//Start from scratch: deleteIndex()
@@ -50,7 +54,6 @@ func main() {
 		panic(err)
 		return
 	}
-
 
 	// Use the IndexExists service to check if a specified index exists.
 	exists, err := client.IndexExists(INDEX).Do()
@@ -79,18 +82,36 @@ func main() {
 	}
 
 	fmt.Println("started-service")
-	http.HandleFunc("/post", handlerPost)
-	http.HandleFunc("/search", handlerSearch)
-	http.HandleFunc("/delete", handlerDelete)
+	// Here we are instantiating the gorilla/mux router
+	r := mux.NewRouter()
+
+	var jwtMiddleware = jwtmiddleware.New(jwtmiddleware.Options{
+		ValidationKeyGetter: func(token *jwt.Token) (interface{}, error) {
+			return mySigningKey, nil
+		},
+		SigningMethod: jwt.SigningMethodHS256,
+	})
+
+	r.Handle("/post", jwtMiddleware.Handler(http.HandlerFunc(handlerPost))).Methods("POST")
+	r.Handle("/search", jwtMiddleware.Handler(http.HandlerFunc(handlerSearch))).Methods("GET")
+	r.Handle("/login", http.HandlerFunc(loginHandler)).Methods("POST")
+	r.Handle("/signup", http.HandlerFunc(signupHandler)).Methods("POST")
+	//TODO: r.Handle("/delete",xxx)
+
+	http.Handle("/", r)
 	log.Fatal(http.ListenAndServe(":8080", nil))
+
 }
 
 func handlerPost(w http.ResponseWriter, r *http.Request) {
 	// Parse from body of request to get a json object.
+	user := r.Context().Value("user")
+	claims := user.(*jwt.Token).Claims
+	username := claims.(jwt.MapClaims)["username"]
+
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
-
 
 	// 32 << 20 is the maxMemory param for ParseMultipartForm, equals to 32MB (1MB = 1024 * 1024 bytes = 2^20 bytes)
 	// After you call ParseMultipartForm, the file will be saved in the server memory with maxMemory size.
@@ -102,7 +123,7 @@ func handlerPost(w http.ResponseWriter, r *http.Request) {
 	lat, _ := strconv.ParseFloat(r.FormValue("lat"), 64)
 	lon, _ := strconv.ParseFloat(r.FormValue("lon"), 64)
 	p := &Post{
-		User:    "1111",
+		User:    username.(string),
 		Message: r.FormValue("message"),
 		Location: Location{
 			Lat: lat,
@@ -139,8 +160,7 @@ func handlerPost(w http.ResponseWriter, r *http.Request) {
 	saveToES(p, id)
 
 	// Save to BigTable.
-	//saveToBigTable(p, id)
-
+	saveToBigTable(ctx, p, id)
 
 }
 
@@ -153,6 +173,16 @@ func handlerDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	deleteToES(&p)
+	ctx := context.Background()
+	_, err := deleteToGCS(ctx, BUCKET_NAME, p.Id)
+	if err != nil {
+		http.Error(w, "The deletion of %s is not successful.\n", http.StatusInternalServerError)
+		fmt.Printf("The deletion of %s is not successful.\n", p.Id)
+		return
+	}
+
+	//TODO: deleteToGCS
+	//TODO: deleteToBigTable
 }
 
 // Save a post to ElasticSearch
@@ -180,7 +210,35 @@ func saveToES(p *Post, id string) {
 	fmt.Printf("Post is saved to Index: %s\n", p.Message)
 }
 
-func saveToGCS(ctx context.Context, r io.Reader, bucketName , name string) (*storage.ObjectHandle, *storage.ObjectAttrs, error) {
+func saveToBigTable(ctx context.Context, p *Post, id string) {
+	//Create a client to bigTable
+	bt_client, err := bigtable.NewClient(ctx, PROJECT_ID, BT_INSTANCE)
+	if err != nil {
+		panic(err)
+		return
+	}
+
+	tbl := bt_client.Open("post")
+	mut := bigtable.NewMutation()
+	t := bigtable.Now()
+
+	//save data to a row(mutation)
+	//TODO: edit the table structure under each post to include the id field.
+	mut.Set("post", "user", t, []byte(p.User)) //like "jack1"
+	mut.Set("post", "message", t, []byte(p.Message))
+	mut.Set("location", "lat", t, []byte(strconv.FormatFloat(p.Location.Lat, 'f', -1, 64)))
+	mut.Set("location", "lon", t, []byte(strconv.FormatFloat(p.Location.Lon, 'f', -1, 64)))
+
+	err = tbl.Apply(ctx, id, mut)
+	if err != nil {
+		panic(err)
+		return
+	}
+	fmt.Printf("Post is saved to BigTable: %s\n", p.Message)
+
+}
+
+func saveToGCS(ctx context.Context, r io.Reader, bucketName, name string) (*storage.ObjectHandle, *storage.ObjectAttrs, error) {
 	// Student questions
 	client, err := storage.NewClient(ctx)
 	if err != nil {
@@ -213,8 +271,7 @@ func saveToGCS(ctx context.Context, r io.Reader, bucketName , name string) (*sto
 
 }
 
-
-func deleteToES (p* Post) {
+func deleteToES(p *Post) {
 	// Create a client
 	es_client, err := elastic.NewClient(elastic.SetURL(ES_URL), elastic.SetSniff(false))
 	if err != nil {
@@ -224,10 +281,7 @@ func deleteToES (p* Post) {
 
 	// Delete by Query
 	id := p.Id
-	_, err = es_client.Delete().Index(INDEX).
-				    Type(TYPE).
-				    Id(id).
-			            Do()
+	_, err = es_client.Delete().Index(INDEX).Type(TYPE).Id(id).Do()
 
 	if err != nil {
 		panic(err)
@@ -235,6 +289,29 @@ func deleteToES (p* Post) {
 	}
 
 	fmt.Printf("Post is deleted to Index: %s\n", p.Message)
+}
+
+func deleteToGCS(ctx context.Context, bucketName, name string) (bool, error) {
+	client, err := storage.NewClient(ctx)
+
+	if err != nil {
+		return false, err
+	}
+
+	defer client.Close()
+
+	bucket := client.Bucket(bucketName)
+	if _, err := bucket.Attrs(ctx); err != nil {
+		return false, err
+	}
+
+	obj := bucket.Object(name)
+	if err := obj.Delete(ctx); err != nil {
+		return false, err
+	}
+
+	return true, nil
+
 }
 
 func deleteIndex() {
@@ -245,7 +322,6 @@ func deleteIndex() {
 	}
 
 	_, err = es_client.DeleteIndex(INDEX).Do()
-
 
 	if err != nil {
 		panic(err)
@@ -265,7 +341,7 @@ func handlerSearch(w http.ResponseWriter, r *http.Request) {
 		ran = val + "km"
 	}
 
-	fmt.Printf( "Search received: %f %f %s\n", lat, lon, ran)
+	fmt.Printf("Search received: %f %f %s\n", lat, lon, ran)
 
 	// Create a client
 	client, err := elastic.NewClient(elastic.SetURL(ES_URL), elastic.SetSniff(false))
@@ -336,5 +412,3 @@ func containsFilteredWords(s *string) bool {
 	}
 	return false
 }
-
-
